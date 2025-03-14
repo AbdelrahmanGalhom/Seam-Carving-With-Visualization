@@ -1,154 +1,260 @@
 import numpy as np
-
+import matplotlib.pyplot as plt
 import cv2
+from scipy.ndimage import convolve
 from .DynamicMapping import DynamicMapping
 
 class SeamCarving:
-    def __init__(self,filename,out_height,out_width):
-        self.filename = filename
-        self.out_height = out_height
-        self.out_width = out_width
+    """
+    Implements the seam carving algorithm for content-aware image resizing.
+    
+    Attributes:
+        image_path (str): Path to the input image.
+        target_height (int): Desired height of the output image.
+        target_width (int): Desired width of the output image.
+        input_image (ndarray): Original input image.
+        output_image (ndarray): Resized output image.
+        visualization_image (ndarray): Image with seam visualization.
+        mapping (DynamicMapping): Tracks pixel positions between original and resized images.
+    """
+    
+    def __init__(self, image_path, target_height, target_width):
+        """
+        Initialize the SeamCarving object.
+        
+        Args:
+            image_path (str): Path to the input image.
+            target_height (int): Desired height of the output image.
+            target_width (int): Desired width of the output image.
+        """
+        self.image_path = image_path
+        self.target_height = target_height
+        self.target_width = target_width
+        
+        # Load and initialize images
+        self.input_image = cv2.imread(image_path).astype(np.float32)
+        self.output_image = np.copy(self.input_image)
+        self.visualization_image = np.copy(self.input_image)
+        
+        # Get image dimensions
+        self.input_height, self.input_width = self.input_image.shape[:2]
+        
+        # Initialize pixel mapping
+        self.mapping = DynamicMapping(self.input_height, self.input_width)
 
-        self.img = cv2.imread(filename).astype(np.float32) # reading image as float32 (no need for higher precision)
-        self.in_height = self.img.shape[0] # height of the Input image
-        self.in_width = self.img.shape[1] # width of the input image
-        self.out_img = np.copy(self.img) # output image
-        self.vis_img = np.copy(self.img) # visualization image
-
-        self.mapping = DynamicMapping(self.in_height, self.in_width)
-
-        self.seam_carving()
-
-    def seam_carving(self):
-        rows_to_remove = self.in_height - self.out_height
-        cols_to_remove = self.in_width - self.out_width
-
+    def process(self):
+        """Execute the seam carving algorithm to resize the image."""
+        # Calculate number of rows and columns to remove
+        rows_to_remove = self.input_height - self.target_height
+        cols_to_remove = self.input_width - self.target_width
+        
         # Remove columns if needed (reduce width)
         if cols_to_remove > 0:
-            self.seams_removal(cols_to_remove,True)
+            self._remove_seams(cols_to_remove, is_vertical=True)
         
         # Remove rows if needed (reduce height)
         if rows_to_remove > 0:
-            self.out_img = self.rotate_image(self.out_img, 1)
-            self.seams_removal(rows_to_remove,False)
-            self.out_img = self.rotate_image(self.out_img, 0)
+            self.output_image = self._rotate_image(self.output_image, clockwise=False)
+            self._remove_seams(rows_to_remove, is_vertical=False)
+            self.output_image = self._rotate_image(self.output_image, clockwise=True)
     
-
-    def seams_removal(self, pixels, cols=True):
-        for i in range(pixels):
-            energy_map = self.calc_energy_map()
-            seam_idx = self.dp_cumulative_map(energy_map)
+    def _remove_seams(self, num_seams, is_vertical=True):
+        """
+        Remove the specified number of seams from the image.
+        
+        Args:
+            num_seams (int): Number of seams to remove.
+            is_vertical (bool): If True, remove vertical seams; otherwise, remove horizontal seams.
+        """
+        for _ in range(num_seams):
+            # Calculate energy map
+            energy_map = self._calculate_energy_map()
             
-            if cols:
-                self.vis_img = self.visualize_seam(seam_idx)
+            # Find optimal seam using dynamic programming
+            seam = self._find_optimal_seam(energy_map)
             
-            # Only pass valid positions within current image dimensions
+            # Update visualization if removing vertical seams
+            if is_vertical:
+                self.visualization_image = self._visualize_seam(seam)
+            
+            # Get valid removals (within image bounds)
             valid_removals = []
-            for r in range(len(seam_idx)):
-                if r < self.out_img.shape[0] and seam_idx[r] < self.out_img.shape[1]:
-                    valid_removals.append((r, seam_idx[r]))
-                    
+            for row in range(len(seam)):
+                if row < self.output_image.shape[0] and seam[row] < self.output_image.shape[1]:
+                    valid_removals.append((row, seam[row]))
+            
+            # Update mapping and remove seam
             self.mapping.apply_removals(valid_removals)
-            self.delete_seam(seam_idx)
-
-
-    def visualize_seam(self, seam_idx):
-        m, n = self.vis_img.shape[: 2]
-        output = np.copy(self.vis_img)
-        
-        # Get the seam pixels mapped to the original image
-        for row in range(min(m, len(seam_idx))):
-            if seam_idx[row] < self.out_img.shape[1]:
-                col = self.mapping.get_pos_in_original(row, seam_idx[row])
-                if 0 <= col < n:  # Ensure index is in bounds
-                    output[row, col] = [0, 0, 255]
-        
-        return output
+            self._delete_seam(seam)
     
-    def calc_energy_map(self):
-        b, g, r = cv2.split(self.out_img) # splitting the image into its 3 channels
-
-        #There are multiple ways to calculate the energy map of the image
-        #1. Summing the absolute values of the gradients in the x and y directions
-        # b_energy = np.absolute(cv2.Sobel(b, -1, 1, 0)) + np.absolute(cv2.Sobel(b, -1, 0, 1)) 
-        # g_energy = np.absolute(cv2.Sobel(g, -1, 1, 0)) + np.absolute(cv2.Sobel(g, -1, 0, 1))
-        # r_energy = np.absolute(cv2.Sobel(r, -1, 1, 0)) + np.absolute(cv2.Sobel(r, -1, 0, 1))
-
-        #2. sqrt((dI/dx)^2 + (dI/dy)^2)
-        #b_energy = np.sqrt(cv2.Sobel(b, -1, 1, 0)**2 + cv2.Sobel(b, -1, 0, 1)**2)
-        #g_energy = np.sqrt(cv2.Sobel(g, -1, 1, 0)**2 + cv2.Sobel(g, -1, 0, 1)**2)
-        #r_energy = np.sqrt(cv2.Sobel(r, -1, 1, 0)**2 + cv2.Sobel(r, -1, 0, 1)**2)
-
-        #3. Using roll to calculate the gradient
-        b_energy = np.abs(np.roll(b, -1, axis=1) - np.roll(b, 1, axis=1)) + np.abs(np.roll(b, -1, axis=0) - np.roll(b, 1, axis=0))
-        g_energy = np.abs(np.roll(g, -1, axis=1) - np.roll(g, 1, axis=1)) + np.abs(np.roll(g, -1, axis=0) - np.roll(g, 1, axis=0))
-        r_energy = np.abs(np.roll(r, -1, axis=1) - np.roll(r, 1, axis=1)) + np.abs(np.roll(r, -1, axis=0) - np.roll(r, 1, axis=0))
-
+    def _calculate_energy_map(self):
+        """
+        Calculate the energy map of the current image.
+        
+        Returns:
+            ndarray: Energy map of the image.
+        """
+        b, g, r = cv2.split(self.output_image)
+        
+        # Using Sobel-like kernels for energy calculation
+        kernel_x = np.array([[1, 0, -1], [2, 0, -2], [1, 0, -1]])
+        kernel_y = np.array([[1, 2, 1], [0, 0, 0], [-1, -2, -1]])
+        
+        # Calculate energy for each channel
+        b_energy = np.abs(convolve(b, kernel_x, mode='reflect')) + np.abs(convolve(b, kernel_y, mode='reflect'))
+        g_energy = np.abs(convolve(g, kernel_x, mode='reflect')) + np.abs(convolve(g, kernel_y, mode='reflect'))
+        r_energy = np.abs(convolve(r, kernel_x, mode='reflect')) + np.abs(convolve(r, kernel_y, mode='reflect'))
+        
+        # Combine channel energies
         return b_energy + g_energy + r_energy
     
-    def calc_energy_map_grayscale(self):
-        # Convert to uint8 format for cvtColor operation
-        img_for_gray = np.clip(self.out_img, 0, 255).astype(np.uint8)
-        gray = cv2.cvtColor(img_for_gray, cv2.COLOR_BGR2GRAY)
-        # Convert back to float for calculations
-        gray = gray.astype(np.float32)
-        # Calculate energy by roll method
-        energy = np.abs(np.roll(gray, -1, axis=1) - np.roll(gray, 1, axis=1)) + np.abs(np.roll(gray, -1, axis=0) - np.roll(gray, 1, axis=0))
-        return energy
-    
-    
-    def dp_cumulative_map(self,energy_map):
-        h, w = energy_map.shape
-        dp = energy_map.copy()
-        backtrack = np.zeros_like(dp, dtype=np.int32)
+    def _find_optimal_seam(self, energy_map):
+        """
+        Find the optimal seam using dynamic programming.
         
-        for i in range(1, h):
-            for j in range(w):
-                min_col = j
-                if j > 0 and dp[i-1, j-1] < dp[i-1, min_col]:
-                    min_col = j - 1
-                if j < w-1 and dp[i-1, j+1] < dp[i-1, min_col]:
-                    min_col = j + 1
-                dp[i, j] += dp[i-1, min_col]
-                backtrack[i, j] = min_col
+        Args:
+            energy_map (ndarray): Energy map of the image.
+            
+        Returns:
+            list: Indices of the optimal seam.
+        """
+        height, width = energy_map.shape
         
+        # Initialize cumulative energy map and backtracking array
+        cumulative_map = energy_map.copy()
+        backtrack = np.zeros_like(cumulative_map, dtype=np.int32)
+        
+        # Dynamic programming to find minimum energy path
+        for i in range(1, height):
+            for j in range(width):
+                # Check left neighbor
+                if j > 0 and cumulative_map[i-1, j-1] < cumulative_map[i-1, j]:
+                    min_energy_col = j - 1
+                else:
+                    min_energy_col = j
+                
+                # Check right neighbor
+                if j < width-1 and cumulative_map[i-1, j+1] < cumulative_map[i-1, min_energy_col]:
+                    min_energy_col = j + 1
+                
+                # Update cumulative energy and backtrack arrays
+                cumulative_map[i, j] += cumulative_map[i-1, min_energy_col]
+                backtrack[i, j] = min_energy_col
+        
+        # Backtrack to find the seam
         seam = []
-        min_idx = np.argmin(dp[-1])
-        for i in range(h-1, -1, -1):
-            seam.append(min_idx)
-            min_idx = backtrack[i, min_idx]
-        return seam[::-1]
-
-    def delete_seam(self, seam_idx):
-        m, n = self.out_img.shape[: 2]
-        output = np.zeros((m, n - 1, 3))
-        for row in range(m):
-            col = seam_idx[row]
-            output[row, :, 0] = np.delete(self.out_img[row, :, 0], [col])
-            output[row, :, 1] = np.delete(self.out_img[row, :, 1], [col])
-            output[row, :, 2] = np.delete(self.out_img[row, :, 2], [col])
-        self.out_img = np.copy(output)
-
-    def rotate_image(self, image, ccw):
-        m, n, ch = image.shape
-        output = np.zeros((n, m, ch))
-        if ccw:
-            image_flip = np.fliplr(image)
-            for c in range(ch):
-                for row in range(m):
-                    output[:, row, c] = image_flip[row, :, c]
-        else:
-            for c in range(ch):
-                for row in range(m):
-                    output[:, m - 1 - row, c] = image[row, :, c]
+        min_energy_col = np.argmin(cumulative_map[-1])
+        
+        for i in range(height-1, -1, -1):
+            seam.append(min_energy_col)
+            min_energy_col = backtrack[i, min_energy_col]
+            
+        return seam[::-1]  # Reverse to get top-to-bottom order
+    
+    def _delete_seam(self, seam):
+        """
+        Remove the specified seam from the output image.
+        
+        Args:
+            seam (list): Indices of the seam to remove.
+        """
+        height, width = self.output_image.shape[:2]
+        new_image = np.zeros((height, width - 1, 3))
+        
+        for row in range(height):
+            col = seam[row]
+            new_image[row, :, 0] = np.delete(self.output_image[row, :, 0], col)
+            new_image[row, :, 1] = np.delete(self.output_image[row, :, 1], col)
+            new_image[row, :, 2] = np.delete(self.output_image[row, :, 2], col)
+            
+        self.output_image = new_image
+    
+    def _visualize_seam(self, seam):
+        """
+        Create a visualization of the seam on the input image.
+        
+        Args:
+            seam (list): Indices of the seam.
+            
+        Returns:
+            ndarray: Image with the seam highlighted.
+        """
+        height, width = self.visualization_image.shape[:2]
+        output = np.copy(self.visualization_image)
+        
+        # Highlight seam pixels on the visualization image
+        for row in range(min(height, len(seam))):
+            if seam[row] < self.output_image.shape[1]:
+                col = self.mapping.get_pos_in_original(row, seam[row])
+                if 0 <= col < width:  # Ensure index is within bounds
+                    output[row, col] = [0, 0, 255]  # Red color in BGR
+        
         return output
     
+    def _rotate_image(self, image, clockwise=True):
+        """
+        Rotate the image 90 degrees.
+        
+        Args:
+            image (ndarray): Image to rotate.
+            clockwise (bool): If True, rotate clockwise; otherwise, rotate counterclockwise.
+            
+        Returns:
+            ndarray: Rotated image.
+        """
+        height, width, channels = image.shape
+        rotated = np.zeros((width, height, channels))
+        
+        if not clockwise:  # Counterclockwise rotation
+            flipped = np.fliplr(image)
+            for c in range(channels):
+                for row in range(height):
+                    rotated[:, row, c] = flipped[row, :, c]
+        else:  # Clockwise rotation
+            for c in range(channels):
+                for row in range(height):
+                    rotated[:, height - 1 - row, c] = image[row, :, c]
+                    
+        return rotated
+    
     def save_output_image(self):
-        img_name = self.filename.split(".")[0]
-        cv2.imwrite(f"{img_name}_output.jpg", self.out_img)
+        """Save the resized output image to disk."""
+        img_name = self.image_path.split(".")[0]
+        cv2.imwrite(f"{img_name}_output.jpg", self.output_image)
     
     def save_visualization_image(self):
-        img_name = self.filename.split(".")[0]
-        cv2.imwrite(f"{img_name}_visualization.jpg", self.vis_img)
-
-
+        """Save the visualization image to disk."""
+        img_name = self.image_path.split(".")[0]
+        cv2.imwrite(f"{img_name}_visualization.jpg", self.visualization_image)
+    
+    def visualize_results(self):
+        """Display input, output, and visualization images side by side."""
+        # Convert images to uint8 for display
+        input_img = self.input_image.astype(np.uint8)
+        output_img = self.output_image.astype(np.uint8)
+        vis_img = self.visualization_image.astype(np.uint8)
+        
+        # Create figure with three subplots
+        plt.figure(figsize=(15, 5))
+        
+        # Input image
+        plt.subplot(1, 3, 1)
+        plt.imshow(cv2.cvtColor(input_img, cv2.COLOR_BGR2RGB))
+        plt.title("Input Image")
+        plt.axis('off')
+        
+        # Output image
+        plt.subplot(1, 3, 2)
+        plt.imshow(cv2.cvtColor(output_img, cv2.COLOR_BGR2RGB))
+        plt.title("Output Image")
+        plt.axis('off')
+        
+        # Visualization image
+        plt.subplot(1, 3, 3)
+        plt.imshow(cv2.cvtColor(vis_img, cv2.COLOR_BGR2RGB))
+        plt.title("Seams Visualization")
+        plt.axis('off')
+        
+        # Show the plot
+        plt.tight_layout()
+        plt.show()
