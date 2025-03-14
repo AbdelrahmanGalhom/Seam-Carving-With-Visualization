@@ -1,4 +1,5 @@
 import numpy as np
+
 import cv2
 from .DynamicMapping import DynamicMapping
 
@@ -18,7 +19,7 @@ class SeamCarving:
 
         self.seam_carving()
 
-    def _seam_carving(self):
+    def seam_carving(self):
         rows_to_remove = self.in_height - self.out_height
         cols_to_remove = self.in_width - self.out_width
 
@@ -33,7 +34,7 @@ class SeamCarving:
             self.out_img = self.rotate_image(self.out_img, 0)
     
 
-    def _seams_removal(self, pixels, cols=True):
+    def seams_removal(self, pixels, cols=True):
         for i in range(pixels):
             energy_map = self.calc_energy_map()
             seam_idx = self.dp_cumulative_map(energy_map)
@@ -51,7 +52,7 @@ class SeamCarving:
             self.delete_seam(seam_idx)
 
 
-    def _visualize_seam(self, seam_idx):
+    def visualize_seam(self, seam_idx):
         m, n = self.vis_img.shape[: 2]
         output = np.copy(self.vis_img)
         
@@ -64,7 +65,7 @@ class SeamCarving:
         
         return output
     
-    def _calc_energy_map(self):
+    def calc_energy_map(self):
         b, g, r = cv2.split(self.out_img) # splitting the image into its 3 channels
 
         #There are multiple ways to calculate the energy map of the image
@@ -85,7 +86,7 @@ class SeamCarving:
 
         return b_energy + g_energy + r_energy
     
-    def _calc_energy_map_grayscale(self):
+    def calc_energy_map_grayscale(self):
         # Convert to uint8 format for cvtColor operation
         img_for_gray = np.clip(self.out_img, 0, 255).astype(np.uint8)
         gray = cv2.cvtColor(img_for_gray, cv2.COLOR_BGR2GRAY)
@@ -96,7 +97,7 @@ class SeamCarving:
         return energy
     
     
-    def _dp_cumulative_map(self,energy_map):
+    def dp_cumulative_map(self,energy_map):
         h, w = energy_map.shape
         dp = energy_map.copy()
         backtrack = np.zeros_like(dp, dtype=np.int32)
@@ -118,7 +119,7 @@ class SeamCarving:
             min_idx = backtrack[i, min_idx]
         return seam[::-1]
 
-    def _delete_seam(self, seam_idx):
+    def delete_seam(self, seam_idx):
         m, n = self.out_img.shape[: 2]
         output = np.zeros((m, n - 1, 3))
         for row in range(m):
@@ -128,7 +129,7 @@ class SeamCarving:
             output[row, :, 2] = np.delete(self.out_img[row, :, 2], [col])
         self.out_img = np.copy(output)
 
-    def _rotate_image(self, image, ccw):
+    def rotate_image(self, image, ccw):
         m, n, ch = image.shape
         output = np.zeros((n, m, ch))
         if ccw:
